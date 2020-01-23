@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import torch
 import numpy as np
-from utils import tensor_to_str
+from src.utils import tensor_to_str
 '''
 Important information:
 - Assume inputs are already reversed, but user does not need to worry about the indexing.
@@ -109,6 +109,7 @@ class STL_Formula(torch.nn.Module):
         Trace should have size [batch_size, time_dim, x_dim]
         Extracts the robustness_trace value at the given time. (Default: time=0 assuming reverse trace)
         '''
+        print(str(type(self)) + ' ' + str(pscale))
         return self.robustness_trace(inputs, pscale=pscale, scale=scale)[:,-(time+1),:].unsqueeze(1)
 
     def eval_trace(self, inputs, pscale=1, scale=-1, **kwargs):
@@ -132,11 +133,11 @@ class STL_Formula(torch.nn.Module):
         '''
         if isinstance(inputs, Expression):
             assert inputs._value is not None, "Input Expression does not have numerical values"
-            return formula.robustness_trace(inputs._value)
+            return formula.robustness_trace(inputs._value, pscale=pscale, scale=scale)
         elif isinstance(inputs, torch.Tensor):
-            return formula.robustness_trace(inputs)
+            return formula.robustness_trace(inputs, pscale=pscale, scale=scale)
         elif isinstance(inputs, tuple):
-            return formula.robustness_trace(convert_to_input_values(inputs))
+            return formula.robustness_trace(convert_to_input_values(inputs), pscale=pscale, scale=scale)
         else:
             raise ValueError("Not a invalid input trace")
 
@@ -219,6 +220,7 @@ class Temporal_Operator(STL_Formula):
         return outputs, states
 
     def robustness_trace(self, inputs, pscale=1, scale=-1, **kwargs):
+        print(str(type(self)) + ' ' + str(pscale))
         trace = self.subformula(inputs, pscale=pscale, scale=scale)
         outputs, states = self._run_rnn_cell(trace, scale=scale)
         return torch.cat(outputs, dim=1)                              # [batch_size, time_dim, ...]
@@ -277,6 +279,7 @@ class LessThan(STL_Formula):
         self.subformula = None
 
     def robustness_trace(self, trace, pscale=1, **kwargs):
+        print(str(type(self)) + ' ' + str(pscale))
         if pscale == 1:
             return self.val - trace
         return (self.val - trace)*pscale
@@ -301,6 +304,7 @@ class GreaterThan(STL_Formula):
         self.subformula = None
 
     def robustness_trace(self, trace, pscale=1, **kwargs):
+        print(str(type(self)) + ' ' + str(pscale))
         if pscale == 1:
             return trace - self.val
         return (trace - self.val)*pscale
@@ -344,7 +348,7 @@ class Negation(STL_Formula):
         self.subformula = subformula
 
     def robustness_trace(self, inputs, pscale=1, scale=-1, **kwargs):
-        return -self.subformula(inputs, pscale=pscale, scale=scale)*pscale
+        return -self.subformula(inputs, pscale=pscale, scale=scale)
 
     def _next_function(self):
         # next function is actually input (traverses the graph backwards)
@@ -366,8 +370,14 @@ class And(STL_Formula):
 
     def robustness_trace(self, inputs, pscale=1, scale=-1, **kwargs):
         x, y = inputs
-        trace1 = self.subformula1(x, pscale=pscale, scale=scale)
-        trace2 = self.subformula2(y, pscale=pscale, scale=scale)
+        # import IPython; IPython.embed()
+        if type(pscale) == tuple:
+            pscale1, pscale2 = pscale
+        else:
+            pscale1 = pscale2 = pscale
+        print(str(type(self)) + ' ' + str(pscale) + ' ' + str(pscale1))
+        trace1 = self.subformula1(x, pscale=pscale1, scale=scale)
+        trace2 = self.subformula2(y, pscale=pscale2, scale=scale)
         xx = torch.stack([trace1, trace2], dim=-1)      # [batch_size, time_dim, ..., 2]
         return self.operation(xx, scale, dim=-1, keepdim=False)                                         # [batch_size, time_dim, ...]
 
@@ -391,8 +401,12 @@ class Or(STL_Formula):
 
     def robustness_trace(self, inputs, pscale=1, scale=-1, **kwargs):
         x, y = inputs
-        trace1 = self.subformula1(x, pscale=pscale, scale=scale)
-        trace2 = self.subformula2(y, pscale=pscale, scale=scale)
+        if type(pscale) == tuple:
+            pscale1, pscale2 = pscale
+        else:
+            pscale1 = pscale2 = pscale
+        trace1 = self.subformula1(x, pscale=pscale1, scale=scale)
+        trace2 = self.subformula2(y, pscale=pscale2, scale=scale)
         xx = torch.stack([trace1, trace2], dim=-1)      # [batch_size, time_dim, ..., 2]
         return self.operation(xx, scale, dim=-1, keepdim=False)                                         # [batch_size, time_dim, ...]
 
@@ -420,15 +434,19 @@ class Until(STL_Formula):
         trace1 and trace2 are size [batch_size, time_dim, x_dim]
         '''
         x, y = inputs
-        trace1 = self.subformula1(x, pscale=pscale, scale=scale)
-        trace2 = self.subformula2(y, pscale=pscale, scale=scale)
+        if type(pscale) == tuple:
+            pscale1, pscale2 = pscale
+        else:
+            pscale1 = pscale2 = pscale
+        trace1 = self.subformula1(x, pscale=pscale1, scale=scale)
+        trace2 = self.subformula2(y, pscale=pscale2, scale=scale)
         Alw = Always(subformula=Identity(name=str(self.subformula1)))
         minish = Minish()
         maxish = Maxish()
         LHS = trace2.unsqueeze(-1).repeat([1, 1, 1,trace2.shape[1]]).permute(0, 3, 2, 1)                                  # [batch_size, time_dim, x_dim, time_dim]
         RHS = torch.ones(LHS.shape)*-LARGE_NUMBER                                                    # [batch_size, time_dim, x_dim, time_dim]
         for i in range(trace2.shape[1]):
-            RHS[:,i:,:,i] = Alw(trace1[:,i:,:], pscale=pscale, scale=scale)
+            RHS[:,i:,:,i] = Alw(trace1[:,i:,:], pscale=pscale1, scale=scale)
         # first min over the (ρ(ψ), ◻ρ(ϕ))
         # then max over the t′ dimension (the second time_dime dimension)
         return maxish(minish(torch.stack([LHS, RHS], dim=-1), scale=scale, dim=-1).squeeze(-1), scale=scale, dim=-1).squeeze(-1)                                                              # [batch_size, time_dim, x_dim]
@@ -456,15 +474,19 @@ class Then(STL_Formula):
         trace1 and trace2 are size [batch_size, time_dim, x_dim]
         '''
         x, y = inputs
-        trace1 = self.subformula1(x, pscale=pscale, scale=scale)
-        trace2 = self.subformula2(y, pscale=pscale, scale=scale)
+        if type(pscale) == tuple:
+            pscale1, pscale2 = pscale
+        else:
+            pscale1 = pscale2 = pscale
+        trace1 = self.subformula1(x, pscale=pscale1, scale=scale)
+        trace2 = self.subformula2(y, pscale=pscale2, scale=scale)
         Ev = Eventually(subformula=Identity(name=str(self.subformula1)))
         minish = Minish()
         maxish = Maxish()
         LHS = trace2.unsqueeze(-1).repeat([1, 1, 1,trace2.shape[1]]).permute(0, 3, 2, 1)                                  # [batch_size, time_dim, x_dim, time_dim]
         RHS = torch.ones(LHS.shape)*-LARGE_NUMBER                                                 # [batch_size, time_dim, x_dim, time_dim]
         for i in range(trace2.shape[1]):
-            RHS[:,i:,:,i] = Ev(trace1[:,i:,:], pscale=pscale, scale=scale)
+            RHS[:,i:,:,i] = Ev(trace1[:,i:,:], pscale=pscale1, scale=scale)
         # first min over the (ρ(ψ), ◻ρ(ϕ))
         # then max over the t′ dimension (the second time_dime dimension)
         return maxish(minish(torch.stack([LHS, RHS], dim=-1), scale=scale, dim=-1).squeeze(-1), scale=scale, dim=-1).squeeze(-1)                                                              # [batch_size, time_dim, x_dim]
